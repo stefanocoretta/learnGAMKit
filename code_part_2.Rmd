@@ -1,0 +1,155 @@
+---
+title: "Learn Generalised Additive (Mixed) Models"
+author: "Stefano Coretta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+theme_set(theme_minimal())
+library(mgcv)
+library(tidygam)
+```
+
+# Part II: Hands-on
+
+## The study
+
+In the hands-on you will use the data from the paper by Bettelou Los et al. *The decline of local anchoring: A quantitative investigation* (2023), published in English Language and Linguistics (<https://www.doi.org/10.1017/S1360674323000047>).
+
+The abstract of the paper should give you enough background to understand the context of the data. Here it is:
+
+This article presents a quantitative study of the referential status of PPs in clause-initial position in the history of English. Earlier work (Los 2009; Dreschler 2015) proposed that main-clause-initial PPs in Old English primarily function as ‘local anchors’, linking a new clause to the immediately preceding discourse. As this function was an integral part of the verb-second (V2) constraint, the decline of local anchors was attributed to the loss of V2 in the fifteenth century, so that only the contrasting and frame-setting functions of these PPs remain in PDE. This article tests these hypotheses in the syntactically parsed corpora of OE, ME, EModE and LModE texts, using the Pentaset-categories (*New, Inert, Assumed, Inferred or Identity*; Komen 2011), based on Prince's categories (Prince 1981). The finding is that *Identity* clause-initial PPs decline steeply from early ME onwards, which means the decline pre-dates the loss of V2. A likely trigger is the loss of the OE paradigm of demonstrative, which functioned as standalone demonstrative pronouns as well as demonstrative determiners, and the loss of gender marking more generally. From EModE onwards, main-clause-initial PPs that still link to the preceding discourse do so much more indirectly, by an *Inferred* link.
+
+### The data
+
+To speed things up, here is the code to read and wrangle the `eng_hist.csv` file. (This workshop uses tidyverse code, it does not matter if you are not very comfortable with it, focus on the GAMs code instead and feel free to use base R.)
+
+Note that the `eng_hist.csv` file does not contain counts of PPs, but rather occurences of PPs with information on English period, text ID and Pentaset category.
+
+We have to do some data wrangling and then get the counts in `eng_count` below.
+
+```{r eng-hist}
+eng_hist <- read_csv("data/eng_hist.csv")
+
+eng_filt <- eng_hist %>%
+  # Filter out excluded items
+  filter(Include == 1) %>%
+  mutate(
+    # Create a numeric version of EnglishPeriod for fitting GAMs.
+    # Smooths only work with numeric variables.
+    period = case_when(
+      EnglishPeriod == "OE" ~ 1,
+      EnglishPeriod == "ME" ~ 2,
+      EnglishPeriod == "eModE" ~ 3,
+      EnglishPeriod == "lModE" ~ 4
+    ),
+    EnglishPeriod = factor(EnglishPeriod, levels = c("OE", "ME", "eModE", "lModE")),
+    Pentaset = factor(Pentaset, levels = c("Identity", "Inferred", "Assumed", "Inert", "New")),
+    # Needed as factor for factor smooths (random effects)
+    TextId = as.factor(TextId)
+  )
+
+# We obtain the counts of PPs by period, Pentaset category and text.
+# We keep number of words in the text (Words) to input it as offset in the GAM later.
+eng_count <- eng_filt %>%
+  group_by(EnglishPeriod, period, TextId, Pentaset, Words) %>%
+  count() %>%
+  ungroup()
+```
+
+The following is a description of the variables in `eng_count`:
+
+- `EnglishPeriod`: the historical period (OE, ME, eModE, ModE).
+- `period`: the historical period as a number (1:4).
+- `TextId`: the text ID.
+- `Pentaset`: the Pentaset category of the occurrence.
+- `Words`: the number of words in the text.
+- `n`: the number of PPs in the specified text and Pentaset category.
+
+Here is a plot showing the proportion of PP counts by Pentaset and English period. This is what we will model using GAMs.
+
+```{r eng-hist-plot}
+eng_filt %>%
+  ggplot(aes(EnglishPeriod, fill = Pentaset)) +
+  geom_bar(position = "fill") +
+  scale_fill_brewer(palette = "Set1")
+```
+
+### Prep the data for a GAM
+
+Now, let's prepare the data `eng_count` for fitting.
+
+- You should convert the `Pentaset` column to an ordered factor (so we can use it as a `by`-variable in the GAMM). Call it `Pentaset_o`.
+- Change the contrasts of `Pentaset_o` to `contr.treatment`.
+- Make sure `TextId` is a factor (so we can use it with factor smooth interactions, i.e. random smooths).
+
+```{r eng-hist-prep}
+
+```
+
+Now we can fit the GAMM. We need:
+
+- `n` as the outcome variable in the model.
+- A parametric effect of `Pentaset_o`.
+- A reference smooth over `period`. Which value for `k` shall we use?
+- A reference smooth over `period` with `Pentaset_o` set as the `by`-variable. Which value for `k` shall we use?
+- We will include classic random effects with `re` (in the paper we did this because there was no added benefit in using factor smooth interactions and using `re` speeded up computation). I added the code for you below.
+- We will also add an "offset" to the model. Offsets are a robust way to normalise counts when using raw counts rather than proportions (i.e. `n` is the raw count of PPs out of the number of words in `Words`). I will add this bit for you in the code below.
+- Since our outcome variable is a count, we need to use the Poisson family (`family = poisson`) instead of the Gaussian (which is the default). (For an introduction to Poisson models, see <https://doi.org/10.1111/lnc3.12439> by Winter and Bürkner).
+
+So far we've been using the `gam()` function. The alternative `bam()` is designed to be more computationally efficient when working with big amounts of data (`bam` for "Big gAM"). It never hurts to also use it with smaller amounts of data and there isn't a simple formula to tell what big or small amounts actually mean. So just go with `bam()`
+
+```{r eng-hist-gam}
+eng_hist_gam <- bam(
+  ... ~
+    # Fill in with all the needed terms/smooths
+    ... +
+    # Random effects
+    s(TextId, bs = "re", m = 1) +
+    # This is the code to include an offset.
+    # We will get estimated counts per 100k words (because we are dividing `Words` by 100k).
+    offset(log(Words/100000)),
+  data = eng_count,
+  # Fill in the right family.
+  family = ...,
+  # We can set discrete to TRUE to speed up computation.
+  discrete = TRUE
+)
+```
+
+If you are completely lost (or you want to check what you did), you can have a look at the code from the paper here: <https://github.com/stefanocoretta/2020-penta/blob/bd9e4d6c56bc9d2206f1de9d5e49cff0073ae168/2020-penta.qmd#L201>. **BUT GIVE IT A TRY YOURSELF FIRST!** :)
+
+Now that you have fitted the model, why don't you try to interpret the summary?
+
+Remember:
+
+- The parametric terms tell you if there are differences in smooth HEIGHT relative to the reference (Intercept).
+
+- The smooth terms tell you if there are differences in smooth SHAPE relative to the reference smooth.
+
+```{r eng-hist-gam-sum}
+summary(eng_hist_gam)
+```
+
+
+Go ahead and get the predictions for the model with `predict_gam()`.
+
+- Make sure you exclude the random effect `re` term.
+- Since we included an offset in the model, we need to specify a value for `Words` (by default, the average value from the range in the data is selected). You can do so with the `values` argument of `predict_gam()`, which takes a named vector of values (see `?predict_gam` for examples).
+
+Familiarise yourself with the output.
+
+```{r}
+
+```
+
+Now go ahead and plot the predictions.
+
+```{r}
+
+```
+
+What can you say about the change in PP numbers by Pentaset category?
